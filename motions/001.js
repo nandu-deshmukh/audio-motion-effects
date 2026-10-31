@@ -1,0 +1,16 @@
+/* motions/filename.js */
+//order:1,
+(function(){
+const {add}=MKIT;
+
+add([
+
+{key:'001', name:'Zoom Out Reveal', tag:'reveal / bada scene', 
+    order:2, draw(c,img,p,t,W,H){
+  MX.cover(c,img,W,H,{z:1.3-.25*MX.oc(p)}); MX.flash(c,W,H,'#fff',.5*Math.exp(-t*3)); MX.vig(c,W,H,'rgba(0,0,0,.9)',.3)}},
+
+
+
+]);
+
+})();

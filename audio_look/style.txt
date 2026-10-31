@@ -1,0 +1,9 @@
+(function () {
+  'use strict';
+  const { FPS, HAS_FILTER, RNG, clamp, lerpC, scaleC, css, seg, dot, ring, register } = window.AUDIO_KIT;
+
+
+
+    register({ key: 'neural_swarm', py: 19, name: 'Cybernetic Neural Swarm', tag: 'neurons · synapse signals · voice-print',
+    defaults: { x: 185, y: 555, scale: 1 }, cls: CyberneticNeuralSwarm });
+})();
