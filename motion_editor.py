@@ -496,20 +496,18 @@ def _audio_items(proj, clips):
     return items
 
 
-def _final_mux(proj, clips, lst, audio, outp, tmp):
-    """concat video + main audio + video ki awaaz + SFX  ->  final mp4 (dB, fade, delay, mute ke saath)"""
-    au = proj.get("audio") or {}
-    items = _audio_items(proj, clips)
-    use_main = bool(audio) and not au.get("mute")
-    base_cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst]
-    if not use_main and not items:
+def _mux(base_cmd, main, items, outp, tmp):
+    """video input (base_cmd) + main audio + items  ->  outp (video copy + aac audio; dB, fade, delay ke saath)"""
+    if not main and not items:
         return run_ff(base_cmd + ["-c", "copy", "-movflags", "+faststart", outp])
 
     def build(norm):
         cmd, parts, labels, idx = list(base_cmd), [], [], 1
-        if use_main:
-            cmd += ["-i", audio]
-            parts.append(f"[{idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={_db(au.get('vol')):.2f}dB[a{idx}]")
+        if main:
+            if main.get("ss") is not None:
+                cmd += ["-ss", f"{main['ss']:.3f}", "-t", f"{main['t']:.3f}"]
+            cmd += ["-i", main["file"]]
+            parts.append(f"[{idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={_db(main.get('db')):.2f}dB[a{idx}]")
             labels.append(f"[a{idx}]")
             idx += 1
         for it in items:
@@ -549,11 +547,66 @@ def _final_mux(proj, clips, lst, audio, outp, tmp):
     return ok, err
 
 
+def _final_mux(proj, clips, lst, audio, outp, tmp):
+    """concat video + main audio + video ki awaaz + SFX  ->  final mp4"""
+    au = proj.get("audio") or {}
+    items = _audio_items(proj, clips)
+    main = {"file": audio, "ss": None, "t": None, "db": _db(au.get("vol"))} if audio and not au.get("mute") else None
+    return _mux(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst], main, items, outp, tmp)
+
+
+def _window_items(items, t0, t1):
+    """timeline items ko [t0, t1] window me kaato; at ab window ke start se"""
+    out = []
+    for it in items:
+        a0, a1 = it["at"], it["at"] + it["t"]
+        s, e = max(a0, t0), min(a1, t1)
+        if e - s < 0.02:
+            continue
+        n = dict(it)
+        n["ss"], n["t"], n["at"] = it["ss"] + (s - a0), e - s, s - t0
+        n["fi"], n["fo"] = max(0.0, it["fi"] - (s - a0)), max(0.0, it["fo"] - (a1 - e))
+        out.append(n)
+    return out
+
+
+def clip_audio_mux(proj, c, vfile):
+    """selected item render: clip ke time-range ki audio (main + video ki awaaz + SFX) vfile me mix karo"""
+    t0, dur = float(c["start"]), float(c["duration"])
+    au = proj.get("audio") or {}
+    audio = resolve_path(au.get("path", ""))
+    items = _window_items(_audio_items(proj, [c]), t0, t0 + dur)
+    main = {"file": audio, "ss": t0, "t": dur, "db": _db(au.get("vol"))} if audio and not au.get("mute") else None
+    if not main and not items:
+        return True, "koi audio nahi"
+    tmp = os.path.join(HERE, ".render_tmp")
+    os.makedirs(tmp, exist_ok=True)
+    out = vfile + ".a.mp4"
+    ok, err = _mux(["ffmpeg", "-y", "-loglevel", "error", "-i", vfile], main, items, out, tmp)
+    if ok:
+        os.replace(out, vfile)
+    return ok, err
+
+
+def clip_audio_worker(proj, cid, rel):
+    try:
+        c = next((x for x in proj.get("clips", []) if x.get("id") == cid), None)
+        fp = os.path.join(HERE, rel)
+        if not c or not os.path.isfile(fp):
+            raise RuntimeError("clip ya rendered file nahi mili")
+        ok, err = clip_audio_mux(proj, c, fp)
+        if not ok:
+            raise RuntimeError("audio mix error: " + err)
+        CJOB.update(state="done", file=rel, msg="")
+    except Exception as e:
+        CJOB.update(state="error", msg=str(e))
+
+
 # ---------------- selected video clip render: motion/<output>.mp4 ----------------
 CJOB = {"state": "idle", "msg": "", "file": ""}
 
 
-def render_clip_worker(proj, cid, vpart_rel):
+def render_clip_worker(proj, cid, vpart_rel, audio=False):
     try:
         st = proj.get("settings", {})
         W, H, FPS = int(st.get("width", 1280)), int(st.get("height", 720)), int(st.get("fps", 25))
@@ -574,8 +627,7 @@ def render_clip_worker(proj, cid, vpart_rel):
         base = outp + ".base.mp4" if vp else outp
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(c.get("in", 0) or 0), "-t", f"{dur:.3f}", "-i", src,
                "-vf", VF, "-frames:v", str(n), "-map", "0:v:0"]
-        if _has_audio(src) and not c.get("amute") and not vt.get("mute"):
-            cmd += ["-map", "0:a:0", "-af", f"volume={_db(c.get('vol_db')) + _db(vt.get('vol')):.2f}dB", "-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-an"]                         # audio optional: neeche clip_audio_mux se judti hai
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(FPS), base]
         ok, err = run_ff(cmd)
         if not ok:
@@ -592,6 +644,10 @@ def render_clip_worker(proj, cid, vpart_rel):
                 pass
             if not ok:
                 raise RuntimeError("audio animation blend error: " + err)
+        if audio:
+            ok, err = clip_audio_mux(proj, c, outp)
+            if not ok:
+                raise RuntimeError("audio mix error: " + err)
         CJOB.update(state="done", file=os.path.relpath(outp, HERE), msg="")
     except Exception as e:
         CJOB.update(state="error", msg=str(e))
@@ -894,11 +950,15 @@ button{font:inherit}
 #bar button:hover,.tb button:hover{background:#4a5370}
 #bar button:disabled{opacity:.5}
 #bar .sep{width:1px;height:22px;background:#3a4152}
-#pname{color:#e3b3ff;font-weight:600}
+#pname{color:#e3b3ff;font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #pp{background:#2d6cdf!important;min-width:76px;font-weight:600}
 #rbtn{background:#238636!important}#rbtn2{background:#1f6f6f!important}
 #tt{font-variant-numeric:tabular-nums;color:#ffd479;min-width:170px}
-#saved{color:#7d869a;font-size:12px}#toast{margin-left:auto;color:#7ee787}#stat{color:#9fb0d0;font-size:12px}
+#saved{display:inline-block;width:18px;text-align:center;color:#7d869a;font-size:14px;cursor:default}
+#saved.ok{color:#7ee787}#saved.dirty{color:#f5a524}#saved.err{color:#ff6b6b}
+#toast{position:fixed;right:16px;bottom:16px;max-width:min(560px,60vw);background:#1d2a1f;border:1px solid #2f6b3a;color:#bff5c8;padding:8px 14px;border-radius:8px;z-index:300;box-shadow:0 6px 20px #000a;font-size:13px;line-height:1.4}
+#toast:empty{display:none}
+#stat{color:#9fb0d0;font-size:12px;white-space:nowrap;margin-left:auto}
 label.ck{color:#9fb0d0;font-size:12px;display:flex;gap:4px;align-items:center}
 /* library */
 #lib{background:#1b1e27;border-right:1px solid #2b3040;display:grid;grid-template-rows:auto 1fr;min-height:0}
@@ -1081,6 +1141,7 @@ label.ck{color:#9fb0d0;font-size:12px;display:flex;gap:4px;align-items:center}
     <span class="sep"></span>
     <button id="rbtn" onclick="renderFull()">🎬 Full video render</button>
     <button id="rbtn2" onclick="renderSelected()">💾 Selected item render</button>
+    <label class="ck" title="selected item ke time-range ki audio (main audio + video ki awaaz + SFX) bhi mix karo"><input type="checkbox" id="selaud">🔊 audio ke saath</label>
     <label class="ck"><input type="checkbox" id="cache" checked>purane render reuse</label>
     <button onclick="exportPy()">→ animate_data_new.py</button>
     <span id="stat"></span><span id="toast"></span>
@@ -1269,11 +1330,13 @@ function normClip(c){
   if(c.vis&&c.vis.length)c.vis.forEach(v=>{if(!v.id)v.id=uid()});else delete c.vis;
 }
 let saveT=null;
-function scheduleSave(){$('saved').textContent='● unsaved';clearTimeout(saveT);saveT=setTimeout(saveNow,700)}
+function setSaved(st,msg){const e=$('saved');e.className=st;e.textContent=st==='ok'?'✓':st==='dirty'?'●':'⚠';e.title=msg||''}
+function setTitle(){$('pname').textContent=S.P.name;$('pname').title=S.P.name+'\nfile: '+S.file;document.title=S.P.name+' · '+S.file+' — Motion Editor'}
+function scheduleSave(){setSaved('dirty','save hone wala hai...');clearTimeout(saveT);saveT=setTimeout(saveNow,700)}
 async function saveNow(as){
   clearTimeout(saveT);S.P.clips.forEach(normClip);
-  try{const r=await api('/api/save',{project:S.P,as:as||''});if(!r.ok)throw 0;S.file=r.file;$('saved').textContent='saved ✓ '+r.file;$('pname').textContent=S.P.name+'  ('+r.file+')'}
-  catch(e){$('saved').textContent='⚠ save error'}
+  try{const r=await api('/api/save',{project:S.P,as:as||''});if(!r.ok)throw 0;S.file=r.file;setSaved('ok','saved: '+r.file+'  ('+new Date().toLocaleTimeString()+')');setTitle()}
+  catch(e){setSaved('err','save error: server se jawab nahi mila')}
 }
 function saveAs(){const n=prompt('Naye project ka naam:',S.P.name);if(!n)return;S.P.name=n;saveNow(n)}
 function pushUndo(){S.hist.push(JSON.stringify(S.P));if(S.hist.length>80)S.hist.shift();S.fut=[]}
@@ -1288,7 +1351,7 @@ function afterLoad(keepView){
   LC.width=W;LC.height=H;S.cv.width=W;S.cv.height=H;fitStage();
   if(S.sel&&!byId(S.sel))S.sel=null;
   loadAudio();renderLib();renderAudBox();VRT={};renderVisBox();ensureVis();
-  $('pname').textContent=P.name+'  ('+S.file+')';
+  setTitle();
   changed(true);if(!keepView){fit();restoreView()}
 }
 function changed(nosave){
@@ -2127,6 +2190,13 @@ async function renderClipFrames(c,rel,label,setBtn,mode){
     const e=await api('/api/render_end',{job});if(!e.ok)throw new Error(e.error);return e.file;
   }catch(err){fetch('/api/render_cancel',{method:'POST',body:JSON.stringify({job})});throw err}
 }
+async function waitClipJob(){
+  for(;;){
+    await sleep(700);const s=await api('/api/clip_status');
+    if(s.state==='done')return s.file;
+    if(s.state==='error')throw new Error(s.msg);
+  }
+}
 async function renderSelected(){
   if(R.busy)return;
   const c=curClip();
@@ -2134,13 +2204,19 @@ async function renderSelected(){
   if(S.tryKey&&c.type==='image')addAt(c.id,S.tryKey,S.tryStart);
   const hasFx=c.type==='image'&&(c.effects||[]).length,hasVis=(c.vis||[]).length;
   if(c.type==='image'&&!hasFx&&!hasVis)return toast('image par pehle effect ya audio animation lagao');
+  const withAudio=$('selaud').checked,tag=withAudio?' (audio ke saath)':' (bina audio)';
   R.busy=true;R.cancel=false;setPlaying(false);const b=$('rbtn2'),old=b.textContent;
   try{
     if(hasVis){await ensureVis();while(S.visBusy)await sleep(300);if(!S.visData)throw new Error('Analysis audio ka data taiyar nahi (🎧 Audio animations tab)')}
     if(c.type==='image'){
-      const f=await renderClipFrames(c,c.output+'.mp4','⏳',t=>b.textContent=t,'full');
-      toast('✓ Saved: '+f);
-    }else{                                   // video: ffmpeg se cut + (animation ho to) overlay blend, video ki awaaz ke saath
+      let f=await renderClipFrames(c,c.output+'.mp4','⏳',t=>b.textContent=t,'full');
+      if(withAudio){
+        b.textContent='⏳ audio mix ho rahi hai...';
+        const r=await api('/api/clip_audio',{project:S.P,id:c.id,file:f});if(!r.ok)throw new Error(r.error||'audio start fail');
+        f=await waitClipJob();
+      }
+      toast('✓ Saved: '+f+tag);
+    }else{                                   // video: ffmpeg se cut + (animation ho to) overlay blend
       let vpart='';
       if(hasVis){
         const rel='_cache/v_'+visKey(c)+'.mp4';let have=[];
@@ -2148,12 +2224,9 @@ async function renderSelected(){
         vpart=have.length?'motion/'+rel:await renderClipFrames(c,rel,'⏳ 🎧',t=>b.textContent=t,'vis');
       }
       b.textContent='⏳ video ban rahi hai...';
-      const r=await api('/api/render_clip',{project:S.P,id:c.id,vpart});if(!r.ok)throw new Error(r.error||'start fail');
-      for(;;){
-        await sleep(700);const s=await api('/api/clip_status');
-        if(s.state==='done'){toast('✓ Saved: '+s.file);break}
-        if(s.state==='error')throw new Error(s.msg);
-      }
+      const r=await api('/api/render_clip',{project:S.P,id:c.id,vpart,audio:withAudio});if(!r.ok)throw new Error(r.error||'start fail');
+      const f=await waitClipJob();
+      toast('✓ Saved: '+f+tag);
     }
   }catch(err){console.error(err);toast('Render error: '+err.message)}
   R.busy=false;b.textContent=old;
@@ -2876,7 +2949,15 @@ class Handler(BaseHTTPRequestHandler):
             if not has("ffmpeg"):
                 return self.send_json({"ok": False, "error": "ffmpeg install nahi hai"})
             CJOB.update(state="running", msg="", file="")
-            threading.Thread(target=render_clip_worker, args=(body.get("project", {}), body.get("id", ""), body.get("vpart", "")), daemon=True).start()
+            threading.Thread(target=render_clip_worker, args=(body.get("project", {}), body.get("id", ""), body.get("vpart", ""), bool(body.get("audio"))), daemon=True).start()
+            self.send_json({"ok": True})
+        elif path == "/api/clip_audio":
+            if CJOB["state"] == "running":
+                return self.send_json({"ok": False, "error": "clip job pehle se chal raha hai"})
+            if not has("ffmpeg"):
+                return self.send_json({"ok": False, "error": "ffmpeg install nahi hai"})
+            CJOB.update(state="running", msg="", file="")
+            threading.Thread(target=clip_audio_worker, args=(body.get("project", {}), body.get("id", ""), str(body.get("file", ""))), daemon=True).start()
             self.send_json({"ok": True})
         elif path == "/api/render_final":
             if FINAL["state"] == "running":

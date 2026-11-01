@@ -1,3 +1,4 @@
+
 # Motion Editor
 
 A browser-based, Kdenlive-style video editor for building **audio-driven story videos** from images and video clips. The whole app is a single Python file (standard library only) that serves a rich HTML/JavaScript editor on `localhost`.
@@ -8,8 +9,23 @@ You assemble a timeline from images and videos, add **cinematic image effects** 
 
 ---
 
+## Demo
+
+<!--
+  HOW TO USE: replace YOUR_VIDEO_ID with the id of your YouTube video.
+  https://www.youtube.com/watch?v=5oslDi5m2PQ   ->   id = 5oslDi5m2PQ
+  https://youtu.be/5oslDi5m2PQ                  ->   id = 5oslDi5m2PQ
+  If the large thumbnail does not exist, use .../hqdefault.jpg instead of maxresdefault.jpg
+-->
+[![Motion Editor – demo video](https://img.youtube.com/vi/5oslDi5m2PQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=5oslDi5m2PQ)
+
+▶ Click the thumbnail to watch the demo on YouTube.
+
+---
+
 ## Table of contents
 
+0. [Demo](#demo)
 1. [Features](#features)
 2. [How it works (architecture)](#how-it-works-architecture)
 3. [Requirements](#requirements)
@@ -170,7 +186,7 @@ python -m pip install numpy
 
 **4. Get the project**
 ```bat
-git clone https://github.com/<your-user>/<your-repo>.git
+git clone https://github.com/nandu-deshmukh/audio-motion-effects.git
 cd <your-repo>
 ```
 (or download the ZIP from GitHub and extract it).
@@ -317,13 +333,15 @@ __pycache__/
 ### Top bar
 | Control | Purpose |
 |---|---|
-| project name | current project and its file |
+| project name | current project (the file name is shown as a tooltip and in the browser tab title) |
+| ● / ✓ / ⚠ | save state: orange = saving soon, green = saved (hover for the file name and time), red = error |
 | **New / Open / Save / Save As** | project management (autosave is always on) |
 | **⚙** | project settings (name, resolution, FPS, fade, default image length, root folder) |
 | **▶ Play**, time | play / pause, current time / total |
 | **⛶ Max view** | full-screen preview (`M`) |
 | **🎬 Full video render** | render the whole project |
 | **💾 Selected item render** | render only the selected image / video clip |
+| **🔊 audio ke saath** | tick to include the audio of that clip's time range in *Selected item render* (off = silent video) |
 | **purane render reuse** | reuse cached pieces when nothing changed |
 | **→ animate_data_new.py** | export the timeline in the legacy `data_x` format |
 
@@ -560,8 +578,10 @@ Details:
 - **Cancel:** click the button again while rendering.
 
 ### Selected item render (`💾`)
-- **Image clip:** image + effects + audio animations → `motion/<start>_<end>.mp4` (silent).
-- **Video clip:** the trimmed clip scaled to the project size, with audio animations blended on top and the video's own sound (with its dB / mute) → `motion/<start>_<end>.mp4`.
+Renders only the selected clip to `motion/<start>_<end>.mp4`:
+- **Image clip:** image + effects + audio animations.
+- **Video clip:** the trimmed clip scaled to the project size, with audio animations blended on top.
+- **🔊 audio ke saath (optional checkbox):** when ticked, the audio of that clip's time range is mixed in – the main audio slice, the video's own sound, and every SFX that overlaps the clip – using the same dB / fade / mute settings as the full render. When unticked, the output is a silent video.
 
 ---
 
@@ -699,6 +719,7 @@ The UI talks to the server through these endpoints (useful for debugging or auto
 
 ## License
 
+
 MIT License
 
 Copyright (c) 2026 nandu-deshmukh
@@ -720,3 +741,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+
+
